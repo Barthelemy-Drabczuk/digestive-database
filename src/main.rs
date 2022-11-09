@@ -75,3 +75,5 @@ impl<T> DigestiveDatabase<T> {
         unserialized_db.insert(data);
     }
 }
+
+// think to use sled instead of BTreeSet for the db
