@@ -1,2 +1,20 @@
-/target
+# C++ build files
+build/
+*.o
+*.a
+*.so
+digestive_db
+
+# Database files
+*.db/
 *.db
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*~
+
+# System files
+.DS_Store
+Thumbs.db
