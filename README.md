@@ -1,6 +1,6 @@
-# Digestive Database
+# Digestive Database - Hybrid Storage System
 
-A self-organizing frequency-based database with tiered compression in C++, optimized for storing large files (images, videos, text) with intelligent compression based on access patterns.
+A high-performance, adaptive database system with **hybrid architecture** combining frequency-based tiered compression, chunked file storage, SQL queries, and adaptive indexes. Optimized for embedded systems (robots, drones, CCTV cameras) and edge computing.
 
 ## Overview
 
@@ -9,6 +9,17 @@ The Digestive Database automatically adjusts compression levels based on access 
 - **Cold data** (rarely accessed) → heavy compression to save space
 
 The database uses a **5-tier progressive compression system** with **4 smart reorganization strategies** to avoid performance issues from constant reorganization.
+
+### 🆕 Hybrid Architecture (NEW!)
+
+The system now features a **hybrid architecture** with optional engines:
+
+- **Chunked File Storage**: Handle 100MB+ files with per-chunk heat tracking and partial access
+- **SQL Engine**: Full SQL support with CREATE, INSERT, SELECT, DELETE, WHERE clauses
+- **Index Engine**: O(1) hash indexes and O(log n) ordered indexes with heat tracking
+- **Heat Decay**: Time-based cooling strategies for long-term storage optimization
+
+All features are **optional** and can be enabled via configuration flags.
 
 ## Key Features
 
@@ -70,6 +81,19 @@ DbConfig config = DbConfig::config_for_videos();
 
 // For text/logs
 DbConfig config = DbConfig::config_for_text();
+
+// 🆕 For embedded systems (robots, drones)
+DbConfig config = DbConfig::config_for_embedded();
+// - Small chunks (256KB)
+// - Time-based heat decay
+// - No SQL/indexes (saves memory)
+
+// 🆕 For CCTV systems
+DbConfig config = DbConfig::config_for_cctv();
+// - Large chunks (4MB = ~1 sec of video)
+// - SQL support for metadata queries
+// - Indexes for camera/timestamp lookups
+// - Exponential heat decay
 ```
 
 ## Installation
@@ -98,7 +122,49 @@ make clean    # Clean build files
 
 ## Quick Start
 
-### Example 1: Image Storage with Auto-Reorganization
+### Example 1: CCTV System with SQL Queries (NEW!)
+
+```cpp
+#include "digestive_database.hpp"
+#include "sql_engine.hpp"
+using namespace digestive;
+
+int main() {
+    // Use CCTV-optimized config with SQL and indexes
+    DbConfig config = DbConfig::config_for_cctv();
+    DigestiveDatabase db("cctv_db", config);
+
+    // Create table for video metadata
+    db.execute_sql(
+        "CREATE TABLE videos ("
+        "id INTEGER PRIMARY KEY, "
+        "filename TEXT, "
+        "camera_id INTEGER, "
+        "timestamp TEXT)"
+    );
+
+    // Create index on camera_id for fast queries
+    db.create_index("videos", "camera_id");
+
+    // Insert video metadata
+    db.execute_sql("INSERT INTO videos VALUES (1, 'vid1.mp4', 1, '2024-12-22 10:00')");
+    db.execute_sql("INSERT INTO videos VALUES (2, 'vid2.mp4', 1, '2024-12-22 10:01')");
+
+    // Store actual video files (automatically chunked if > 1MB)
+    std::vector<uint8_t> video_data(5 * 1024 * 1024);  // 5MB video
+    db.insert_binary("vid1_data", video_data);
+
+    // Query videos by camera (uses index!)
+    auto result = db.execute_sql("SELECT * FROM videos WHERE camera_id = 1");
+
+    // Access specific chunk range (e.g., 2 seconds at offset 10s)
+    auto chunk_data = db.get_chunk_range("vid1_data", 10, 12);
+
+    return 0;
+}
+```
+
+### Example 2: Image Storage with Auto-Reorganization
 
 ```cpp
 #include "digestive_database.hpp"
@@ -149,7 +215,46 @@ config.reorg_change_threshold = 0.2;  // Reorganize when 20% change in access pa
 DigestiveDatabase db("my_db", config);
 ```
 
-### Example 3: Manual Control (No Auto-Reorganization)
+### Example 3: Chunked File with Partial Access (NEW!)
+
+```cpp
+DbConfig config;
+config.enable_chunking = true;
+config.chunk_size = 4 * 1024 * 1024;  // 4MB chunks
+
+DigestiveDatabase db("large_files_db", config);
+
+// Insert 100MB video file
+std::vector<uint8_t> video(100 * 1024 * 1024);
+db.insert_binary("movie", video);
+
+// Access only chunks 10-20 (40MB from middle)
+// WITHOUT loading the full 100MB file!
+auto partial = db.get_chunk_range("movie", 10, 20);
+
+// Check if file is chunked
+if (db.is_chunked("movie")) {
+    std::cout << "File stored as chunks" << std::endl;
+}
+```
+
+### Example 4: Heat Decay for Long-Term Storage (NEW!)
+
+```cpp
+DbConfig config;
+config.enable_heat_decay = true;
+config.heat_decay_strategy = HeatDecayStrategy::EXPONENTIAL;
+config.heat_decay_factor = 0.95;  // 5% decay per hour
+config.heat_decay_interval = 3600;  // Every hour
+
+DigestiveDatabase db("archive_db", config);
+
+// Old data automatically cools down
+// Hot data: TIER_0 (no compression)
+// Cold data: TIER_4 (maximum compression)
+```
+
+### Example 5: Manual Control (No Auto-Reorganization)
 
 ```cpp
 DbConfig config;
@@ -207,6 +312,36 @@ void reorganize();                             // Manually trigger reorganizatio
 void flush();                                  // Flush pending writes to disk
 ```
 
+### 🆕 Chunked File Operations (NEW!)
+
+```cpp
+// Get chunk range (only if chunking enabled)
+std::optional<std::vector<uint8_t>> get_chunk_range(
+    const std::string& key,
+    uint32_t start_chunk,
+    uint32_t end_chunk
+);
+
+// Check if file is chunked
+bool is_chunked(const std::string& key) const;
+```
+
+### 🆕 SQL Operations (NEW!)
+
+```cpp
+// Execute SQL query
+ResultSet execute_sql(const std::string& sql);
+
+// Create index on table column
+void create_index(const std::string& table, const std::string& column);
+
+// Supported SQL commands:
+// - CREATE TABLE table_name (col1 TYPE, col2 TYPE, ...)
+// - INSERT INTO table_name VALUES (val1, val2, ...)
+// - SELECT * FROM table_name [WHERE column = value]
+// - DROP TABLE table_name
+```
+
 ### Statistics
 
 ```cpp
@@ -240,6 +375,20 @@ struct DbConfig {
     bool lazy_persistence;            // Delay writes to disk
     size_t write_buffer_size;         // Buffer size before flushing
     bool use_mmap;                    // Use memory-mapped files (for large data)
+
+    // 🆕 HYBRID SYSTEM: Optional features
+    bool enable_chunking;             // Enable chunked file storage
+    size_t chunking_threshold;        // Files larger than this are chunked
+    size_t chunk_size;                // Size of each chunk
+
+    bool enable_heat_decay;           // Enable automatic heat decay
+    HeatDecayStrategy heat_decay_strategy;  // NONE, EXPONENTIAL, LINEAR, TIME_BASED
+    double heat_decay_factor;         // Decay factor (for EXPONENTIAL)
+    double heat_decay_amount;         // Decay amount (for LINEAR)
+    size_t heat_decay_interval;       // Decay interval in seconds
+
+    bool enable_indexes;              // Enable index engine
+    bool enable_sql;                  // Enable SQL engine
 };
 ```
 
@@ -279,6 +428,27 @@ DbConfig::config_for_text()
 // - ADAPTIVE strategy
 // - Maximum compression (text compresses very well)
 // - Immediate persistence (small data)
+```
+
+**🆕 For Embedded Systems:**
+```cpp
+DbConfig::config_for_embedded()
+// - 100MB size limit
+// - Small chunks (256KB)
+// - Time-based heat decay
+// - No SQL/indexes (memory efficient)
+// - Manual reorganization (user control)
+```
+
+**🆕 For CCTV Systems:**
+```cpp
+DbConfig::config_for_cctv()
+// - 100GB size limit
+// - Large chunks (4MB = ~1 sec HD video)
+// - SQL support for metadata queries
+// - Indexes for camera_id/timestamp
+// - Exponential heat decay
+// - Periodic reorganization (1 hour)
 ```
 
 ## Performance Characteristics
@@ -345,10 +515,23 @@ if (metadata.has_value()) {
 ```
 digestive-database/
 ├── include/
-│   └── digestive_database.hpp    # API and class definitions
+│   ├── digestive_database.hpp    # Main API and class definitions
+│   ├── chunking_engine.hpp       # 🆕 Chunked file storage
+│   ├── index_engine.hpp          # 🆕 Index support
+│   └── sql_engine.hpp            # 🆕 SQL query engine
 ├── src/
-│   ├── digestive_database.cpp    # Implementation
-│   └── main.cpp                  # Examples
+│   ├── digestive_database.cpp    # Core implementation
+│   ├── chunking_engine.cpp       # 🆕 Chunking implementation (430 lines)
+│   ├── index_engine.cpp          # 🆕 Index implementation (480 lines)
+│   ├── sql_engine.cpp            # 🆕 SQL implementation (560 lines)
+│   └── main.cpp                  # Basic examples
+├── examples/
+│   ├── hybrid_demo.cpp           # 🆕 Comprehensive hybrid demo
+│   └── Makefile                  # Example build system
+├── docs/
+│   ├── HYBRID_ARCHITECTURE.md    # 🆕 Architecture documentation
+│   ├── IMPLEMENTATION_STATUS.md  # 🆕 Implementation status
+│   └── COMPLETION_GUIDE.md       # 🆕 Integration guide
 ├── Makefile                       # Build system
 ├── README.md                      # This file
 ├── CHANGELOG.md                   # Version history
@@ -357,14 +540,18 @@ digestive-database/
 
 ## Comparison with Other Solutions
 
-| Feature | Digestive DB | Redis | MongoDB | File System |
-|---------|--------------|-------|---------|-------------|
-| Auto compression | ✅ Per-tier | ❌ | ❌ | ❌ |
-| Access-based optimization | ✅ | ❌ | ❌ | ❌ |
-| Large file support | ✅ | Limited | ✅ | ✅ |
-| Custom compression | ✅ | ❌ | ❌ | ❌ |
-| Embedded (no server) | ✅ | ❌ | ❌ | ✅ |
-| Smart reorganization | ✅ 4 strategies | ❌ | Limited | ❌ |
+| Feature | Digestive DB | Redis | MongoDB | SQLite | File System |
+|---------|--------------|-------|---------|--------|-------------|
+| Auto compression | ✅ Per-tier | ❌ | ❌ | ❌ | ❌ |
+| Access-based optimization | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Large file support | ✅ Chunked | Limited | ✅ GridFS | ❌ | ✅ |
+| Custom compression | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Embedded (no server) | ✅ | ❌ | ❌ | ✅ | ✅ |
+| Smart reorganization | ✅ 4 strategies | ❌ | Limited | ❌ | ❌ |
+| SQL queries | ✅ Basic | ❌ | ✅ | ✅ Full | ❌ |
+| Indexes | ✅ Hash/Ordered | ✅ | ✅ | ✅ | ❌ |
+| Heat decay | ✅ 4 strategies | ❌ | ❌ | ❌ | ❌ |
+| Partial file access | ✅ Chunks | ❌ | ✅ GridFS | ❌ | Limited |
 
 ## FAQ
 

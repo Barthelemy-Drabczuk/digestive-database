@@ -3,7 +3,11 @@ build/
 *.o
 *.a
 *.so
+
+# Executables
 digestive_db
+examples/hybrid_demo
+examples/build/
 
 # Database files
 *.db/

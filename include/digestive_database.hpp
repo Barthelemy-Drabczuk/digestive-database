@@ -9,6 +9,14 @@
 #include <memory>
 #include <functional>
 
+// Forward declarations for optional engines
+namespace digestive {
+    class ChunkingEngine;
+    class IndexEngine;
+    class SqlEngine;
+    struct ResultSet;
+}
+
 namespace digestive {
 
 /**
@@ -75,6 +83,7 @@ struct NodeMetadata {
     CompressionAlgo algorithm;   // Algorithm used for compression
     size_t original_size;        // Size before compression
     size_t compressed_size;      // Size after compression
+    double heat;                 // Heat value (0.0 to 1.0) - for time-based decay
 
     NodeMetadata();
 };
@@ -87,6 +96,16 @@ enum class ReorgStrategy {
     EVERY_N_OPS,    // Reorganize after N operations
     PERIODIC,       // Reorganize every N seconds
     ADAPTIVE        // Smart: reorganize when access pattern changes significantly
+};
+
+/**
+ * Heat decay strategy
+ */
+enum class HeatDecayStrategy {
+    NONE,              // No decay (cumulative counts only)
+    EXPONENTIAL,       // heat *= decay_factor (e.g., 0.95)
+    LINEAR,            // heat -= decay_amount
+    TIME_BASED         // Decay based on time since last access
 };
 
 /**
@@ -112,11 +131,33 @@ struct DbConfig {
     size_t write_buffer_size;    // Buffer size before flushing to disk
     bool use_mmap;               // Use memory-mapped files for large data
 
+    // HYBRID SYSTEM: Optional features (pay only for what you use)
+
+    // Chunking for large files
+    bool enable_chunking;        // Enable chunking for files > chunking_threshold
+    size_t chunking_threshold;   // Files larger than this are chunked (default: 1MB)
+    size_t chunk_size;           // Size of each chunk (default: 4MB)
+
+    // Heat decay (time-based cooling)
+    bool enable_heat_decay;      // Enable time-based heat decay
+    HeatDecayStrategy heat_decay_strategy;  // Decay strategy
+    double heat_decay_factor;    // For exponential: multiply factor (e.g., 0.95)
+    double heat_decay_amount;    // For linear: subtract amount
+    uint64_t heat_decay_interval; // Apply decay every N seconds
+
+    // Indexing
+    bool enable_indexes;         // Enable index support
+
+    // SQL support
+    bool enable_sql;             // Enable SQL query interface
+
     DbConfig();
     static DbConfig default_config();
-    static DbConfig config_for_images();    // Preset for image storage
-    static DbConfig config_for_videos();    // Preset for video storage
-    static DbConfig config_for_text();      // Preset for text/logs
+    static DbConfig config_for_images();      // Preset for image storage
+    static DbConfig config_for_videos();      // Preset for video storage
+    static DbConfig config_for_text();        // Preset for text/logs
+    static DbConfig config_for_embedded();    // Preset for embedded systems (low memory)
+    static DbConfig config_for_cctv();        // Preset for CCTV (chunking + SQL + decay)
 };
 
 /**
@@ -200,11 +241,45 @@ public:
      */
     std::optional<std::string> get(const std::string& key);
 
+    // ==================== Chunked File API (for large files) ====================
+
+    /**
+     * Get specific chunk range from large file
+     * @param key File identifier
+     * @param start_chunk First chunk index
+     * @param end_chunk Last chunk index (inclusive)
+     * @return Chunk data if found
+     */
+    std::optional<std::vector<uint8_t>> get_chunk_range(const std::string& key,
+                                                         uint32_t start_chunk,
+                                                         uint32_t end_chunk);
+
+    /**
+     * Check if key refers to a chunked file
+     */
+    bool is_chunked(const std::string& key) const;
+
+    // ==================== SQL API ====================
+
+    /**
+     * Execute SQL query
+     * Requires enable_sql = true in config
+     * @param sql SQL query string
+     * @return Result set
+     */
+    ResultSet execute_sql(const std::string& sql);
+
+    /**
+     * Create an index on a table column
+     * Requires enable_indexes = true in config
+     */
+    void create_index(const std::string& table, const std::string& column);
+
     // ==================== Database Management ====================
 
     /**
      * Delete a key-value pair
-     * @return true if deleted, false if not found
+     * @return true if deleted, false if key not found
      */
     bool remove(const std::string& key);
 
@@ -213,6 +288,12 @@ public:
      * Recompresses items into appropriate tiers based on access patterns
      */
     void reorganize();
+
+    /**
+     * Manually trigger heat decay
+     * Applies heat decay to all entries (if enabled)
+     */
+    void apply_heat_decay();
 
     /**
      * Flush pending writes to disk
@@ -247,6 +328,7 @@ private:
     uint64_t total_accesses_;
     size_t operations_since_reorg_;
     uint64_t last_reorg_time_;
+    uint64_t last_heat_decay_time_;
 
     // In-memory cache of data and metadata
     std::map<std::string, std::vector<uint8_t>> data_store_;
@@ -255,6 +337,11 @@ private:
     // Write buffer for lazy persistence
     std::map<std::string, std::vector<uint8_t>> write_buffer_;
     size_t write_buffer_current_size_;
+
+    // HYBRID SYSTEM: Optional engines (created only if enabled)
+    std::unique_ptr<ChunkingEngine> chunking_engine_;
+    std::unique_ptr<IndexEngine> index_engine_;
+    std::unique_ptr<SqlEngine> sql_engine_;
 
     // Helper methods
     void load_from_disk();
@@ -271,6 +358,7 @@ private:
 
     // Tier management
     CompressionTier calculate_tier(uint64_t access_count) const;
+    CompressionTier calculate_tier_from_heat(double heat) const;
     void check_size_limit();
     void delete_coldest_data();
 
@@ -279,9 +367,18 @@ private:
     bool should_reorganize() const;
     double calculate_access_pattern_change() const;
 
+    // Heat decay management
+    void check_heat_decay_trigger();
+    bool should_apply_heat_decay() const;
+    void apply_heat_decay_to_entry(NodeMetadata& metadata);
+    double calculate_heat_from_access_count(uint64_t access_count) const;
+
     // Utilities
     uint64_t current_timestamp() const;
     void after_operation();  // Called after each insert/get/remove
+
+    // Helper for determining if file should be chunked
+    bool should_chunk_file(size_t file_size) const;
 };
 
 } // namespace digestive

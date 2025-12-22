@@ -1,4 +1,7 @@
 #include "digestive_database.hpp"
+#include "chunking_engine.hpp"
+#include "index_engine.hpp"
+#include "sql_engine.hpp"
 #include <fstream>
 #include <iostream>
 #include <algorithm>
@@ -34,7 +37,8 @@ NodeMetadata::NodeMetadata()
     , tier(CompressionTier::TIER_4)
     , algorithm(CompressionAlgo::ZSTD_MAX)
     , original_size(0)
-    , compressed_size(0) {
+    , compressed_size(0)
+    , heat(0.1) {
 }
 
 // ==================== DbConfig ====================
@@ -49,7 +53,18 @@ DbConfig::DbConfig()
     , reorg_change_threshold(0.2)  // 20% change
     , lazy_persistence(false)
     , write_buffer_size(10 * 1024 * 1024)  // 10MB
-    , use_mmap(false) {
+    , use_mmap(false)
+    // HYBRID SYSTEM: Optional features
+    , enable_chunking(false)
+    , chunking_threshold(1 * 1024 * 1024)  // 1MB
+    , chunk_size(4 * 1024 * 1024)  // 4MB
+    , enable_heat_decay(false)
+    , heat_decay_strategy(HeatDecayStrategy::NONE)
+    , heat_decay_factor(0.95)
+    , heat_decay_amount(0.01)
+    , heat_decay_interval(3600)  // 1 hour
+    , enable_indexes(false)
+    , enable_sql(false) {
 
     // Default tier configurations (lossless only)
     tier_configs[0] = TierConfig(CompressionAlgo::NONE, false);
@@ -117,6 +132,80 @@ DbConfig DbConfig::config_for_text() {
     return config;
 }
 
+DbConfig DbConfig::config_for_embedded() {
+    DbConfig config;
+
+    // Basic settings for low-memory devices
+    config.allow_deletion = true;
+    config.max_size_bytes = 100 * 1024 * 1024;  // 100MB max
+    config.compression_enabled = true;
+    config.reorg_strategy = ReorgStrategy::MANUAL;  // User controls
+    config.lazy_persistence = false;  // Immediate writes (safer)
+    config.write_buffer_size = 512 * 1024;  // 512KB buffer
+    config.use_mmap = false;
+
+    // Enable chunking with small chunks (save RAM)
+    config.enable_chunking = true;
+    config.chunking_threshold = 256 * 1024;  // 256KB threshold
+    config.chunk_size = 256 * 1024;  // 256KB chunks
+
+    // Enable time-based heat decay
+    config.enable_heat_decay = true;
+    config.heat_decay_strategy = HeatDecayStrategy::TIME_BASED;
+    config.heat_decay_interval = 1800;  // 30 minutes
+
+    // Disable heavy features to save memory
+    config.enable_indexes = false;
+    config.enable_sql = false;
+
+    // Aggressive compression
+    config.tier_configs[0] = TierConfig(CompressionAlgo::NONE, false);
+    config.tier_configs[1] = TierConfig(CompressionAlgo::LZ4_FAST, false);
+    config.tier_configs[2] = TierConfig(CompressionAlgo::LZ4_HIGH, false);
+    config.tier_configs[3] = TierConfig(CompressionAlgo::ZSTD_MEDIUM, false);
+    config.tier_configs[4] = TierConfig(CompressionAlgo::ZSTD_MAX, false);
+
+    return config;
+}
+
+DbConfig DbConfig::config_for_cctv() {
+    DbConfig config;
+
+    // CCTV settings
+    config.allow_deletion = true;
+    config.max_size_bytes = 100ULL * 1024 * 1024 * 1024;  // 100GB
+    config.compression_enabled = true;
+    config.reorg_strategy = ReorgStrategy::PERIODIC;
+    config.reorg_time_threshold = 3600;  // 1 hour
+    config.lazy_persistence = true;
+    config.write_buffer_size = 10 * 1024 * 1024;  // 10MB
+    config.use_mmap = true;
+
+    // Enable chunking for video files
+    config.enable_chunking = true;
+    config.chunking_threshold = 1 * 1024 * 1024;  // 1MB
+    config.chunk_size = 4 * 1024 * 1024;  // 4MB chunks (approx 1 sec of HD video)
+
+    // Enable exponential heat decay (old footage becomes cold)
+    config.enable_heat_decay = true;
+    config.heat_decay_strategy = HeatDecayStrategy::EXPONENTIAL;
+    config.heat_decay_factor = 0.95;  // 5% decay per interval
+    config.heat_decay_interval = 3600;  // 1 hour
+
+    // Enable SQL and indexes for queries
+    config.enable_indexes = true;
+    config.enable_sql = true;
+
+    // Light compression (video already compressed)
+    config.tier_configs[0] = TierConfig(CompressionAlgo::NONE, false);
+    config.tier_configs[1] = TierConfig(CompressionAlgo::NONE, false);
+    config.tier_configs[2] = TierConfig(CompressionAlgo::NONE, false);
+    config.tier_configs[3] = TierConfig(CompressionAlgo::LZ4_FAST, false);
+    config.tier_configs[4] = TierConfig(CompressionAlgo::LZ4_FAST, false);
+
+    return config;
+}
+
 // ==================== DatabaseStats ====================
 
 DatabaseStats::DatabaseStats()
@@ -140,7 +229,11 @@ DigestiveDatabase::DigestiveDatabase(const std::string& name, const DbConfig& co
     , total_accesses_(0)
     , operations_since_reorg_(0)
     , last_reorg_time_(current_timestamp())
-    , write_buffer_current_size_(0) {
+    , last_heat_decay_time_(current_timestamp())
+    , write_buffer_current_size_(0)
+    , chunking_engine_(nullptr)
+    , index_engine_(nullptr)
+    , sql_engine_(nullptr) {
 
     // Create database directory if it doesn't exist
     if (!fs::exists(db_path_)) {
@@ -156,17 +249,54 @@ DigestiveDatabase::DigestiveDatabase(const std::string& name, const DbConfig& co
     // Load existing data
     load_from_disk();
     load_metadata();
+
+    // Initialize optional engines
+    if (config_.enable_chunking) {
+        chunking_engine_ = std::make_unique<ChunkingEngine>(db_path_, config_.chunk_size);
+    }
+
+    if (config_.enable_indexes) {
+        index_engine_ = std::make_unique<IndexEngine>();
+        index_engine_->load_indexes(db_path_ + "/indexes.db");
+    }
+
+    if (config_.enable_sql) {
+        sql_engine_ = std::make_unique<SqlEngine>(this);
+        sql_engine_->load_schemas(db_path_ + "/schemas.db");
+    }
 }
 
 DigestiveDatabase::~DigestiveDatabase() {
     flush();  // Flush any pending writes
     save_to_disk();
     save_metadata();
+
+    // Save optional engine state
+    if (config_.enable_indexes && index_engine_) {
+        index_engine_->save_indexes(db_path_ + "/indexes.db");
+    }
+
+    if (config_.enable_sql && sql_engine_) {
+        sql_engine_->save_schemas(db_path_ + "/schemas.db");
+    }
+
+    // chunking_engine_ auto-saves in its destructor
 }
 
 // ==================== Binary Data API ====================
 
 void DigestiveDatabase::insert_binary(const std::string& key, const std::vector<uint8_t>& data) {
+    // Check if file should be chunked
+    if (config_.enable_chunking && should_chunk_file(data.size())) {
+        auto compress_fn = [this](const std::vector<uint8_t>& chunk_data, uint8_t tier) {
+            return compress(chunk_data, static_cast<CompressionTier>(tier));
+        };
+
+        chunking_engine_->insert_chunked(key, data, compress_fn);
+        after_operation();
+        return;
+    }
+
     // Start with coldest tier for new data
     CompressionTier tier = CompressionTier::TIER_4;
     CompressionAlgo algo = config_.tier_configs[static_cast<int>(tier)].algorithm;
@@ -226,6 +356,17 @@ void DigestiveDatabase::insert_from_file(const std::string& key, const std::stri
 }
 
 std::optional<std::vector<uint8_t>> DigestiveDatabase::get_binary(const std::string& key) {
+    // Check if key is chunked
+    if (config_.enable_chunking && chunking_engine_ &&
+        chunking_engine_->get_metadata(key).has_value()) {
+
+        auto decompress_fn = [this](const std::vector<uint8_t>& data, uint8_t tier, size_t original_size) {
+            return decompress(data, config_.tier_configs[tier].algorithm, original_size);
+        };
+
+        return chunking_engine_->get_full_file(key, decompress_fn);
+    }
+
     // Check write buffer first
     auto buffer_it = write_buffer_.find(key);
     if (buffer_it != write_buffer_.end()) {
@@ -854,6 +995,144 @@ uint64_t DigestiveDatabase::current_timestamp() const {
 void DigestiveDatabase::after_operation() {
     operations_since_reorg_++;
     check_reorganization_trigger();
+    check_heat_decay_trigger();
+}
+
+// ==================== NEW: Chunked File Support ====================
+
+std::optional<std::vector<uint8_t>> DigestiveDatabase::get_chunk_range(
+    const std::string& key, uint32_t start_chunk, uint32_t end_chunk) {
+
+    if (!config_.enable_chunking || !chunking_engine_) {
+        return std::nullopt;
+    }
+
+    auto decompress_fn = [this](const std::vector<uint8_t>& data, uint8_t tier, size_t original_size) {
+        return decompress(data, config_.tier_configs[tier].algorithm, original_size);
+    };
+
+    return chunking_engine_->get_chunk_range(key, start_chunk, end_chunk, decompress_fn);
+}
+
+bool DigestiveDatabase::is_chunked(const std::string& key) const {
+    return config_.enable_chunking && chunking_engine_ &&
+           chunking_engine_->get_metadata(key).has_value();
+}
+
+// ==================== NEW: SQL Support ====================
+
+ResultSet DigestiveDatabase::execute_sql(const std::string& sql) {
+    if (!config_.enable_sql || !sql_engine_) {
+        ResultSet result;
+        result.success = false;
+        result.error = "SQL not enabled in configuration";
+        return result;
+    }
+
+    return sql_engine_->execute(sql);
+}
+
+void DigestiveDatabase::create_index(const std::string& table, const std::string& column) {
+    if (!config_.enable_indexes || !index_engine_) {
+        std::cerr << "Indexes not enabled in configuration" << std::endl;
+        return;
+    }
+
+    index_engine_->create_index(table, column, IndexType::HASH, false);
+}
+
+// ==================== NEW: Heat Decay ====================
+
+void DigestiveDatabase::apply_heat_decay() {
+    if (!config_.enable_heat_decay) {
+        return;
+    }
+
+    // Decay metadata heat
+    for (auto& [key, metadata] : metadata_store_) {
+        apply_heat_decay_to_entry(metadata);
+
+        // Recalculate tier based on new heat
+        CompressionTier new_tier = calculate_tier_from_heat(metadata.heat);
+        if (new_tier != metadata.tier) {
+            metadata.tier = new_tier;
+            // Note: Would need recompression in production
+        }
+    }
+
+    // Decay chunk heat
+    if (config_.enable_chunking && chunking_engine_) {
+        double factor = config_.heat_decay_strategy == HeatDecayStrategy::EXPONENTIAL
+                        ? config_.heat_decay_factor : 0.95;
+        chunking_engine_->decay_all_chunks(factor);
+    }
+
+    // Decay index heat
+    if (config_.enable_indexes && index_engine_) {
+        double factor = config_.heat_decay_strategy == HeatDecayStrategy::EXPONENTIAL
+                        ? config_.heat_decay_factor : 0.95;
+        index_engine_->decay_index_heat(factor);
+    }
+
+    last_heat_decay_time_ = current_timestamp();
+}
+
+void DigestiveDatabase::apply_heat_decay_to_entry(NodeMetadata& metadata) {
+    switch (config_.heat_decay_strategy) {
+        case HeatDecayStrategy::EXPONENTIAL:
+            metadata.heat *= config_.heat_decay_factor;
+            break;
+
+        case HeatDecayStrategy::LINEAR:
+            metadata.heat = std::max(0.0, metadata.heat - config_.heat_decay_amount);
+            break;
+
+        case HeatDecayStrategy::TIME_BASED: {
+            uint64_t now = current_timestamp();
+            uint64_t hours_since_access = (now - metadata.last_access) / 3600;
+            metadata.heat = 1.0 / (1.0 + hours_since_access);
+            break;
+        }
+
+        case HeatDecayStrategy::NONE:
+        default:
+            break;
+    }
+}
+
+CompressionTier DigestiveDatabase::calculate_tier_from_heat(double heat) const {
+    if (heat > 0.7) return CompressionTier::TIER_0;
+    if (heat > 0.4) return CompressionTier::TIER_1;
+    if (heat > 0.2) return CompressionTier::TIER_2;
+    if (heat > 0.1) return CompressionTier::TIER_3;
+    return CompressionTier::TIER_4;
+}
+
+double DigestiveDatabase::calculate_heat_from_access_count(uint64_t access_count) const {
+    if (total_accesses_ == 0) return 0.1;
+    double ratio = static_cast<double>(access_count) / static_cast<double>(total_accesses_);
+    return std::min(1.0, ratio * 10.0);
+}
+
+bool DigestiveDatabase::should_chunk_file(size_t file_size) const {
+    return config_.enable_chunking && file_size >= config_.chunking_threshold;
+}
+
+void DigestiveDatabase::check_heat_decay_trigger() {
+    if (!should_apply_heat_decay()) {
+        return;
+    }
+
+    apply_heat_decay();
+}
+
+bool DigestiveDatabase::should_apply_heat_decay() const {
+    if (!config_.enable_heat_decay) {
+        return false;
+    }
+
+    uint64_t now = current_timestamp();
+    return (now - last_heat_decay_time_) >= config_.heat_decay_interval;
 }
 
 } // namespace digestive

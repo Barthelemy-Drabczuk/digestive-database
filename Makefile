@@ -11,8 +11,16 @@ BUILD_DIR := build
 INCLUDE_DIR := include
 
 # Source files
-SOURCES := $(SRC_DIR)/digestive_database.cpp $(SRC_DIR)/main.cpp
-OBJECTS := $(BUILD_DIR)/digestive_database.o $(BUILD_DIR)/main.o
+SOURCES := $(SRC_DIR)/digestive_database.cpp \
+           $(SRC_DIR)/chunking_engine.cpp \
+           $(SRC_DIR)/index_engine.cpp \
+           $(SRC_DIR)/sql_engine.cpp \
+           $(SRC_DIR)/main.cpp
+OBJECTS := $(BUILD_DIR)/digestive_database.o \
+           $(BUILD_DIR)/chunking_engine.o \
+           $(BUILD_DIR)/index_engine.o \
+           $(BUILD_DIR)/sql_engine.o \
+           $(BUILD_DIR)/main.o
 
 # Target executable
 TARGET := digestive_db
