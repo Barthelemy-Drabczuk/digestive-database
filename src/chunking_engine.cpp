@@ -13,7 +13,7 @@ namespace digestive {
 
 ChunkMetadata::ChunkMetadata()
     : chunk_id(0)
-    , heat(0.0)
+    , heat(0)  // Start at 0
     , compressed_size(0)
     , original_size(0)
     , file_offset(0)
@@ -179,7 +179,7 @@ std::optional<std::vector<uint8_t>> ChunkingEngine::get_full_file(
     return get_chunk_range(key, 0, it->second.num_chunks - 1, decompress_fn);
 }
 
-void ChunkingEngine::update_chunk_heat(const std::string& key, uint32_t chunk_id, double heat_increment) {
+void ChunkingEngine::update_chunk_heat(const std::string& key, uint32_t chunk_id, uint32_t heat_increment) {
     auto it = file_metadata_.find(key);
     if (it == file_metadata_.end()) {
         return;
@@ -190,13 +190,15 @@ void ChunkingEngine::update_chunk_heat(const std::string& key, uint32_t chunk_id
         return;
     }
 
-    chunk_it->second.heat = std::min(1.0, chunk_it->second.heat + heat_increment);
+    uint64_t new_heat = static_cast<uint64_t>(chunk_it->second.heat) + heat_increment;
+    chunk_it->second.heat = (new_heat > 1000) ? 1000 : static_cast<uint32_t>(new_heat);
 }
 
-void ChunkingEngine::decay_all_chunks(double decay_factor) {
+void ChunkingEngine::decay_all_chunks(uint32_t decay_factor) {
     for (auto& [key, file_meta] : file_metadata_) {
         for (auto& [chunk_id, chunk_meta] : file_meta.chunks) {
-            chunk_meta.heat *= decay_factor;
+            // heat *= 0.95 → heat = (heat * 950) / 1000
+            chunk_meta.heat = (static_cast<uint64_t>(chunk_meta.heat) * decay_factor) / 1000;
 
             // Update tier based on new heat
             uint8_t new_tier = calculate_tier_from_heat(chunk_meta.heat);
@@ -343,11 +345,11 @@ std::string ChunkingEngine::get_chunk_path(const std::string& key, uint32_t chun
            std::string(3 - std::to_string(chunk_id).length(), '0') + std::to_string(chunk_id) + ".bin";
 }
 
-uint8_t ChunkingEngine::calculate_tier_from_heat(double heat) const {
-    if (heat > 0.7) return 0;      // Hot: uncompressed
-    if (heat > 0.4) return 1;      // Warm: light compression
-    if (heat > 0.2) return 2;      // Medium
-    if (heat > 0.1) return 3;      // Cool
+uint8_t ChunkingEngine::calculate_tier_from_heat(uint32_t heat) const {
+    if (heat > 700) return 0;      // Hot: uncompressed
+    if (heat > 400) return 1;      // Warm: light compression
+    if (heat > 200) return 2;      // Medium
+    if (heat > 100) return 3;      // Cool
     return 4;                       // Cold: heavy compression
 }
 

@@ -28,7 +28,7 @@ struct IndexDefinition {
     std::string column;             // Column name
     IndexType type;                 // Index type
     bool is_unique;                 // Unique constraint
-    double heat;                    // Index heat (how often used)
+    uint32_t heat;                  // Index heat (how often used, 0-1000)
 
     IndexDefinition();
 };
@@ -38,7 +38,7 @@ struct IndexDefinition {
  */
 struct IndexEntry {
     std::vector<uint64_t> row_ids;  // Row IDs matching this value
-    double heat;                     // Heat for this index entry
+    uint32_t heat;                  // Heat for this index entry (0-1000)
 
     IndexEntry();
 };
@@ -122,7 +122,7 @@ public:
     /**
      * Decay heat for all indexes
      */
-    void decay_index_heat(double decay_factor);
+    void decay_index_heat(uint32_t decay_factor);
 
     /**
      * Get all indexes for a table

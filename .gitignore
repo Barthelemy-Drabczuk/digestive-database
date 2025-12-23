@@ -6,12 +6,15 @@ build/
 
 # Executables
 digestive_db
+examples/simple_example
 examples/hybrid_demo
 examples/build/
 
 # Database files
 *.db/
 *.db
+my_simple_db.db/
+examples/my_simple_db.db/
 
 # Editor files
 .vscode/

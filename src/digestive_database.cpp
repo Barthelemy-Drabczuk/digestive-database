@@ -38,7 +38,7 @@ NodeMetadata::NodeMetadata()
     , algorithm(CompressionAlgo::ZSTD_MAX)
     , original_size(0)
     , compressed_size(0)
-    , heat(0.1) {
+    , heat(100) {  // 0.1 → 100
 }
 
 // ==================== DbConfig ====================
@@ -60,8 +60,8 @@ DbConfig::DbConfig()
     , chunk_size(4 * 1024 * 1024)  // 4MB
     , enable_heat_decay(false)
     , heat_decay_strategy(HeatDecayStrategy::NONE)
-    , heat_decay_factor(0.95)
-    , heat_decay_amount(0.01)
+    , heat_decay_factor(950)  // 0.95 → 950 (multiply by 1000)
+    , heat_decay_amount(10)   // 0.01 → 10 (multiply by 1000)
     , heat_decay_interval(3600)  // 1 hour
     , enable_indexes(false)
     , enable_sql(false) {
@@ -189,7 +189,7 @@ DbConfig DbConfig::config_for_cctv() {
     // Enable exponential heat decay (old footage becomes cold)
     config.enable_heat_decay = true;
     config.heat_decay_strategy = HeatDecayStrategy::EXPONENTIAL;
-    config.heat_decay_factor = 0.95;  // 5% decay per interval
+    config.heat_decay_factor = 950;  // 0.95 → 950 (5% decay per interval)
     config.heat_decay_interval = 3600;  // 1 hour
 
     // Enable SQL and indexes for queries
@@ -1062,15 +1062,15 @@ void DigestiveDatabase::apply_heat_decay() {
 
     // Decay chunk heat
     if (config_.enable_chunking && chunking_engine_) {
-        double factor = config_.heat_decay_strategy == HeatDecayStrategy::EXPONENTIAL
-                        ? config_.heat_decay_factor : 0.95;
+        uint32_t factor = config_.heat_decay_strategy == HeatDecayStrategy::EXPONENTIAL
+                        ? config_.heat_decay_factor : 950;
         chunking_engine_->decay_all_chunks(factor);
     }
 
     // Decay index heat
     if (config_.enable_indexes && index_engine_) {
-        double factor = config_.heat_decay_strategy == HeatDecayStrategy::EXPONENTIAL
-                        ? config_.heat_decay_factor : 0.95;
+        uint32_t factor = config_.heat_decay_strategy == HeatDecayStrategy::EXPONENTIAL
+                        ? config_.heat_decay_factor : 950;
         index_engine_->decay_index_heat(factor);
     }
 
@@ -1080,17 +1080,21 @@ void DigestiveDatabase::apply_heat_decay() {
 void DigestiveDatabase::apply_heat_decay_to_entry(NodeMetadata& metadata) {
     switch (config_.heat_decay_strategy) {
         case HeatDecayStrategy::EXPONENTIAL:
-            metadata.heat *= config_.heat_decay_factor;
+            // heat *= 0.95 → heat = (heat * 950) / 1000
+            metadata.heat = (static_cast<uint64_t>(metadata.heat) * config_.heat_decay_factor) / 1000;
             break;
 
         case HeatDecayStrategy::LINEAR:
-            metadata.heat = std::max(0.0, metadata.heat - config_.heat_decay_amount);
+            // heat -= 0.01 → heat -= 10
+            metadata.heat = (metadata.heat > config_.heat_decay_amount) ?
+                            metadata.heat - config_.heat_decay_amount : 0;
             break;
 
         case HeatDecayStrategy::TIME_BASED: {
             uint64_t now = current_timestamp();
             uint64_t hours_since_access = (now - metadata.last_access) / 3600;
-            metadata.heat = 1.0 / (1.0 + hours_since_access);
+            // heat = 1.0 / (1.0 + hours) → heat = 1000 / (1 + hours)
+            metadata.heat = 1000 / (1 + hours_since_access);
             break;
         }
 
@@ -1100,18 +1104,20 @@ void DigestiveDatabase::apply_heat_decay_to_entry(NodeMetadata& metadata) {
     }
 }
 
-CompressionTier DigestiveDatabase::calculate_tier_from_heat(double heat) const {
-    if (heat > 0.7) return CompressionTier::TIER_0;
-    if (heat > 0.4) return CompressionTier::TIER_1;
-    if (heat > 0.2) return CompressionTier::TIER_2;
-    if (heat > 0.1) return CompressionTier::TIER_3;
+CompressionTier DigestiveDatabase::calculate_tier_from_heat(uint32_t heat) const {
+    if (heat > 700) return CompressionTier::TIER_0;  // > 0.7
+    if (heat > 400) return CompressionTier::TIER_1;  // > 0.4
+    if (heat > 200) return CompressionTier::TIER_2;  // > 0.2
+    if (heat > 100) return CompressionTier::TIER_3;  // > 0.1
     return CompressionTier::TIER_4;
 }
 
-double DigestiveDatabase::calculate_heat_from_access_count(uint64_t access_count) const {
-    if (total_accesses_ == 0) return 0.1;
-    double ratio = static_cast<double>(access_count) / static_cast<double>(total_accesses_);
-    return std::min(1.0, ratio * 10.0);
+uint32_t DigestiveDatabase::calculate_heat_from_access_count(uint64_t access_count) const {
+    if (total_accesses_ == 0) return 100;  // 0.1 → 100
+    // Integer math: (access_count * 10000) / total_accesses_
+    // Cap at 1000 (representing 1.0)
+    uint64_t heat = (access_count * 10000ULL) / total_accesses_;
+    return (heat > 1000) ? 1000 : static_cast<uint32_t>(heat);
 }
 
 bool DigestiveDatabase::should_chunk_file(size_t file_size) const {

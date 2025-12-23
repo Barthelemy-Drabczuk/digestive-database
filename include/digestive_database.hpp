@@ -83,7 +83,7 @@ struct NodeMetadata {
     CompressionAlgo algorithm;   // Algorithm used for compression
     size_t original_size;        // Size before compression
     size_t compressed_size;      // Size after compression
-    double heat;                 // Heat value (0.0 to 1.0) - for time-based decay
+    uint32_t heat;               // Heat value (0 to 1000, representing 0.000 to 1.000)
 
     NodeMetadata();
 };
@@ -141,8 +141,8 @@ struct DbConfig {
     // Heat decay (time-based cooling)
     bool enable_heat_decay;      // Enable time-based heat decay
     HeatDecayStrategy heat_decay_strategy;  // Decay strategy
-    double heat_decay_factor;    // For exponential: multiply factor (e.g., 0.95)
-    double heat_decay_amount;    // For linear: subtract amount
+    uint32_t heat_decay_factor;  // For exponential: multiply factor (e.g., 950 for 0.95)
+    uint32_t heat_decay_amount;  // For linear: subtract amount (e.g., 10 for 0.01)
     uint64_t heat_decay_interval; // Apply decay every N seconds
 
     // Indexing
@@ -358,7 +358,7 @@ private:
 
     // Tier management
     CompressionTier calculate_tier(uint64_t access_count) const;
-    CompressionTier calculate_tier_from_heat(double heat) const;
+    CompressionTier calculate_tier_from_heat(uint32_t heat) const;
     void check_size_limit();
     void delete_coldest_data();
 
@@ -371,7 +371,7 @@ private:
     void check_heat_decay_trigger();
     bool should_apply_heat_decay() const;
     void apply_heat_decay_to_entry(NodeMetadata& metadata);
-    double calculate_heat_from_access_count(uint64_t access_count) const;
+    uint32_t calculate_heat_from_access_count(uint64_t access_count) const;
 
     // Utilities
     uint64_t current_timestamp() const;

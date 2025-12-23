@@ -15,7 +15,7 @@ namespace digestive {
  */
 struct ChunkMetadata {
     uint32_t chunk_id;
-    double heat;                    // Individual heat per chunk
+    uint32_t heat;                  // Individual heat per chunk (0-1000)
     size_t compressed_size;
     size_t original_size;
     uint64_t file_offset;           // Offset in chunks storage file
@@ -81,12 +81,12 @@ public:
     /**
      * Update heat for accessed chunks
      */
-    void update_chunk_heat(const std::string& key, uint32_t chunk_id, double heat_increment);
+    void update_chunk_heat(const std::string& key, uint32_t chunk_id, uint32_t heat_increment);
 
     /**
      * Apply heat decay to all chunks
      */
-    void decay_all_chunks(double decay_factor);
+    void decay_all_chunks(uint32_t decay_factor);
 
     /**
      * Get metadata for a chunked file
@@ -119,7 +119,7 @@ private:
 
     // Helper methods
     std::string get_chunk_path(const std::string& key, uint32_t chunk_id) const;
-    uint8_t calculate_tier_from_heat(double heat) const;
+    uint8_t calculate_tier_from_heat(uint32_t heat) const;
 };
 
 } // namespace digestive

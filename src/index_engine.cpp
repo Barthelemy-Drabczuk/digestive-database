@@ -10,13 +10,13 @@ namespace digestive {
 IndexDefinition::IndexDefinition()
     : type(IndexType::NONE)
     , is_unique(false)
-    , heat(0.0) {
+    , heat(0) {
 }
 
 // ==================== IndexEntry ====================
 
 IndexEntry::IndexEntry()
-    : heat(0.0) {
+    : heat(0) {
 }
 
 // ==================== IndexEngine ====================
@@ -254,21 +254,22 @@ std::optional<IndexType> IndexEngine::get_index_type(const std::string& table,
     return it->second.type;
 }
 
-void IndexEngine::decay_index_heat(double decay_factor) {
+void IndexEngine::decay_index_heat(uint32_t decay_factor) {
     // Decay index definition heat
+    // heat *= 0.95 → heat = (heat * 950) / 1000
     for (auto& [key, def] : index_defs_) {
-        def.heat *= decay_factor;
+        def.heat = (static_cast<uint64_t>(def.heat) * decay_factor) / 1000;
     }
 
     // Decay hash index entry heat
     for (auto& [key, entry] : hash_indexes_) {
-        entry.heat *= decay_factor;
+        entry.heat = (static_cast<uint64_t>(entry.heat) * decay_factor) / 1000;
     }
 
     // Decay ordered index entry heat
     for (auto& [index_key, index_map] : ordered_indexes_) {
         for (auto& [value, entry] : index_map) {
-            entry.heat *= decay_factor;
+            entry.heat = (static_cast<uint64_t>(entry.heat) * decay_factor) / 1000;
         }
     }
 }
